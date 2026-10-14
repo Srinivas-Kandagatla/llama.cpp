@@ -1565,6 +1565,33 @@ static bool htp_kparams_solve_binary(
                                             (uint32_t) src0_elem_size, (uint32_t) src1_elem_size, (uint32_t) dst_elem_size,
                                             max_hvx_sess, 2, is_scalar_broadcast, vtcm_size);
         }
+        // Per-row scalar (src1 = [1, ne1, ne2, ne3], e.g. a per-channel snake alpha) with rows too long to stage:
+        // stream each row through the chunked kernel and keep the src1 column in VTCM.
+        const bool is_row_scalar = is_scalar && is_contig && src1->ne[1] == src0->ne[1] &&
+                                   src1->ne[2] == src0->ne[2] && src1->ne[3] == src0->ne[3];
+        const size_t row_scalar_bytes = hex_round_up(ggml_nelements(src1) * src1_elem_size, 128);
+        if (is_row_scalar && row_scalar_bytes <= 64 * 1024 && ggml_nelements(src0) <= UINT32_MAX) {
+            const size_t   elem_size  = (std::max)({ src0_elem_size, src1_elem_size, dst_elem_size });
+            const uint32_t chunk_size = (std::min)((uint32_t) (32768 / elem_size), (uint32_t) hex_round_up(src0->ne[0], 32));
+
+            kparams->kernel_type           = HTP_BINARY_KERNEL_CHUNKED;
+            kparams->n_hvx                 = max_hvx_sess;
+            kparams->n_srcs                = 2;
+            kparams->rows_per_buffer       = 1;
+            kparams->src1_row_size_aligned = 0;
+            kparams->src1_size             = (uint32_t) row_scalar_bytes;
+            kparams->chunk_size            = chunk_size;
+            kparams->chunk_bytes           = hex_round_up(chunk_size * elem_size, 128);
+            kparams->is_scalar             = HTP_BINARY_SCALAR_ROW;
+
+            htp_binary_vtcm_layout_build(&L, kparams, vtcm_size);
+            if (L.total_bytes == 0 || L.total_bytes > vtcm_size) {
+                return false;
+            }
+
+            kparams->vtcm_size = L.total_bytes;
+            return true;
+        }
         return false;
     }
 

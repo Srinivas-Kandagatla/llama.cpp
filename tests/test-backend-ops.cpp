@@ -12636,6 +12636,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // test case for k_bin_bcast_unravel in CUDA backend
         add_test_bin_bcast(type, {1, 1, 65536, 1}, {256, 1, 1, 1});
 
+        // per-row scalar with rows too long to stage whole (e.g. per-channel snake alpha in audio codecs)
+        add_test_bin_bcast(type, {1, 96, 1, 1}, {138240, 1, 1, 1});
+        add_test_bin_bcast(type, {1, 7, 1, 1}, {100003, 1, 1, 1});
+        add_test_bin_bcast(type, {1, 3, 2, 2}, {70001, 1, 1, 1});
+
         // stable diffusion
         add_test_bin_bcast(type, {1280, 1, 1, 1}, {1, 1, 1, 1});
         add_test_bin_bcast(type, {1280, 1, 1, 1}, {1, 16, 16, 1});

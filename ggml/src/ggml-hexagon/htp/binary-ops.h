@@ -20,6 +20,13 @@ enum htp_binary_kernel_type {
     HTP_BINARY_KERNEL_CHUNKED,
 };
 
+// CHUNKED kernel scalar modes (htp_binary_kernel_params.is_scalar)
+enum htp_binary_scalar_mode {
+    HTP_BINARY_SCALAR_NONE = 0,  // elementwise src1
+    HTP_BINARY_SCALAR_ONE  = 1,  // one scalar for the whole tensor
+    HTP_BINARY_SCALAR_ROW  = 2,  // one scalar per src0 row (src1 = [1, ne1, ne2, ne3])
+};
+
 struct htp_binary_kernel_params {
     uint8_t  kernel_type;
     uint8_t  split_at_ne01;
@@ -139,7 +146,8 @@ static inline void htp_binary_vtcm_layout_build(
         L->src1_size = 0;
 
         const size_t src0_total = n_hvx * L->src0_bytes_per_hvx;
-        const size_t src1_total = kparams->is_scalar ? 128 : (n_hvx * L->src1_bytes_per_hvx);
+        const size_t src1_total = kparams->is_scalar == HTP_BINARY_SCALAR_ROW ? kparams->src1_size :
+                                  kparams->is_scalar                          ? 128 : (n_hvx * L->src1_bytes_per_hvx);
         const size_t dst_total  = n_hvx * L->dst_bytes_per_hvx;
 
         size_t off = 0;
@@ -249,7 +257,7 @@ static inline bool htp_binary_solve_chunked(
     kparams->src1_size             = 0;
     kparams->chunk_size            = chunk_size;
     kparams->chunk_bytes           = chunk_bytes;
-    kparams->is_scalar             = is_scalar ? 1 : 0;
+    kparams->is_scalar             = is_scalar ? HTP_BINARY_SCALAR_ONE : HTP_BINARY_SCALAR_NONE;
 
     htp_binary_vtcm_layout_build(L, kparams, vtcm_size);
     if (L->total_bytes == 0 || L->total_bytes > vtcm_size) {

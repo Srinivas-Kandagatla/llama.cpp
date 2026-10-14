@@ -1233,10 +1233,32 @@ struct binary_chunked_context {
     bool                     is_scalar;
     float                    scalar_f32;
     _Float16                 scalar_f16;
+    // per-row scalar mode: chunks never cross a src0 row; each row uses its own src1 value from VTCM
+    bool                     row_scalar;
+    uint32_t                 ne0;
+    uint32_t                 chunks_per_row;
+    uint32_t                 row_start;
+    const uint8_t *          row_scalars;
     compute_binary_chunked_t compute;
     compute_binary_scalar_chunked_f32_t compute_scalar_f32;
     compute_binary_scalar_chunked_f16_t compute_scalar_f16;
 };
+
+// element range of chunk c: flat chunks, or row-local chunks in per-row scalar mode
+static inline void binary_chunk_range(const struct binary_chunked_context * ctx, uint32_t c,
+                                      uint32_t * start, uint32_t * n, uint32_t * row) {
+    if (ctx->row_scalar) {
+        const uint32_t r   = ctx->row_start + c / ctx->chunks_per_row;
+        const uint32_t off = (c % ctx->chunks_per_row) * ctx->chunk_size;
+        *row   = r;
+        *start = r * ctx->ne0 + off;
+        *n     = MIN(ctx->chunk_size, ctx->ne0 - off);
+    } else {
+        *row   = 0;
+        *start = ctx->elem_start + c * ctx->chunk_size;
+        *n     = MIN(*start + ctx->chunk_size, ctx->elem_start + ctx->nelem) - *start;
+    }
+}
 
 static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, unsigned int ith, void * data) {
     (void) nth;
@@ -1251,7 +1273,6 @@ static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, uns
         return;
     }
 
-    const uint32_t chunk_size  = ctx->chunk_size;
     const size_t src0_chunk_bytes = ctx->vtcm_layout.src0_spad_half_size;
     const size_t src1_chunk_bytes = ctx->vtcm_layout.src1_spad_half_size;
     const size_t dst_chunk_bytes  = ctx->vtcm_layout.dst_spad_half_size;
@@ -1270,9 +1291,8 @@ static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, uns
     int spad_idx = 0;
 
     for (int k = 0; k < 2 && prefetch_chunk < end_chunk; k++) {
-        const uint32_t c_start   = ctx->elem_start + prefetch_chunk * chunk_size;
-        const uint32_t c_end     = MIN(c_start + chunk_size, ctx->elem_start + ctx->nelem);
-        const uint32_t cur_elems = c_end - c_start;
+        uint32_t c_start, cur_elems, c_row;
+        binary_chunk_range(ctx, prefetch_chunk, &c_start, &cur_elems, &c_row);
         const uint32_t src0_bytes = cur_elems * ctx->src0_elem_size;
         const uint32_t src1_bytes = cur_elems * ctx->src1_elem_size;
         const uint32_t dst_bytes  = cur_elems * ctx->dst_elem_size;
@@ -1301,9 +1321,8 @@ static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, uns
     struct htp_thread_trace * tr = th->trace;
 
     for (uint32_t c = start_chunk; c < end_chunk; c++) {
-        const uint32_t c_start   = ctx->elem_start + c * chunk_size;
-        const uint32_t c_end     = MIN(c_start + chunk_size, ctx->elem_start + ctx->nelem);
-        const uint32_t cur_elems = c_end - c_start;
+        uint32_t c_start, cur_elems, c_row;
+        binary_chunk_range(ctx, c, &c_start, &cur_elems, &c_row);
         const uint32_t dst_bytes = cur_elems * ctx->dst_elem_size;
 
         uint8_t * d_spad  = (uint8_t *) dma_queue_pop(dma_q).src;
@@ -1313,9 +1332,15 @@ static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, uns
         htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) c);
         if (ctx->is_scalar) {
             if (ctx->compute_scalar_f32) {
-                ctx->compute_scalar_f32(d_spad, s0_spad, ctx->scalar_f32, cur_elems);
+                float v = ctx->scalar_f32;
+                if (ctx->row_scalar) {
+                    v = ctx->src1_elem_size == sizeof(float) ? ((const float *) ctx->row_scalars)[c_row] :
+                                                               (float) ((const _Float16 *) ctx->row_scalars)[c_row];
+                }
+                ctx->compute_scalar_f32(d_spad, s0_spad, v, cur_elems);
             } else {
-                ctx->compute_scalar_f16(d_spad, s0_spad, ctx->scalar_f16, cur_elems);
+                const _Float16 v = ctx->row_scalar ? ((const _Float16 *) ctx->row_scalars)[c_row] : ctx->scalar_f16;
+                ctx->compute_scalar_f16(d_spad, s0_spad, v, cur_elems);
             }
         } else {
             ctx->compute(d_spad, s0_spad, s1_spad, cur_elems);
@@ -1330,9 +1355,8 @@ static void binary_thread_chunked(const htp_thread_t * th, unsigned int nth, uns
         dma_queue_push(dma_q, dma_make_data(dst_curr, d_spad), dst_chunk_bytes, dst_chunk_bytes, dst_bytes, 1);
 
         if (prefetch_chunk < end_chunk) {
-            const uint32_t pc_start  = ctx->elem_start + prefetch_chunk * chunk_size;
-            const uint32_t pc_end    = MIN(pc_start + chunk_size, ctx->elem_start + ctx->nelem);
-            const uint32_t p_elems   = pc_end - pc_start;
+            uint32_t pc_start, p_elems, p_row;
+            binary_chunk_range(ctx, prefetch_chunk, &pc_start, &p_elems, &p_row);
             const uint32_t p_src0_bytes = p_elems * ctx->src0_elem_size;
             const uint32_t p_src1_bytes = p_elems * ctx->src1_elem_size;
 
@@ -1485,7 +1509,9 @@ static int execute_op_binary(struct htp_ops_context * octx) {
             nelem      = range.count;
         }
 
-        if (nelem == 0) {
+        const bool row_scalar = kparams->is_scalar == HTP_BINARY_SCALAR_ROW;
+
+        if (nelem == 0 && !row_scalar) {  // per-row scalar mode partitions rows below
             return HTP_STATUS_OK;
         }
 
@@ -1500,14 +1526,36 @@ static int execute_op_binary(struct htp_ops_context * octx) {
         }
 
         const uint32_t chunk_size = kparams->chunk_size;
-        const uint32_t total_chunks = (nelem + chunk_size - 1) / chunk_size;
+        uint32_t       total_chunks = (nelem + chunk_size - 1) / chunk_size;
+
+        const uint32_t ne0            = src0->ne[0];
+        const uint32_t chunks_per_row = (ne0 + chunk_size - 1) / chunk_size;
+        uint32_t       row_start      = 0;
+        if (row_scalar) {
+            uint32_t nrows = src0_nrows;
+            if (octx->ctx->mdev.count > 1) {
+                const struct htp_tensor_mdev_range range = htp_tensor_mdev_partition(
+                    src0_nrows, 1, octx->ctx->mdev.idx, octx->ctx->mdev.count, &octx->ctx->mdev.count_div);
+                row_start = range.start;
+                nrows     = range.count;
+            }
+            total_chunks = nrows * chunks_per_row;
+            if (total_chunks == 0) {
+                return HTP_STATUS_OK;
+            }
+        }
         const uint32_t n_hvx = (total_chunks >= 2) ? MIN(octx->n_hvx, total_chunks) : 1;
         const uint32_t chunks_per_hvx = (total_chunks + n_hvx - 1) / n_hvx;
 
         float scalar_f32 = 0.0f;
         _Float16 scalar_f16 = 0;
-        if (is_scalar) {
-            uint8_t * vtcm_src1 = VTCM_LAYOUT_PTR(uint8_t, octx->ctx->vtcm_base, vtcm_layout.off_src1);
+        uint8_t * vtcm_src1 = VTCM_LAYOUT_PTR(uint8_t, octx->ctx->vtcm_base, vtcm_layout.off_src1);
+        if (row_scalar) {
+            const uint32_t n = src1->ne[1] * src1->ne[2] * src1->ne[3];
+            dma_queue * dma_q = octx->ctx->dma[0];
+            dma_queue_push(dma_q, dma_make_data(vtcm_src1, src1->data), n * src1_elem_size, n * src1_elem_size, n * src1_elem_size, 1);
+            dma_queue_pop(dma_q);
+        } else if (is_scalar) {
             dma_queue * dma_q = octx->ctx->dma[0];
             dma_queue_push(dma_q, dma_make_data(vtcm_src1, src1->data), 128, 0, src1_elem_size, 1);
             dma_queue_pop(dma_q);
@@ -1540,6 +1588,11 @@ static int execute_op_binary(struct htp_ops_context * octx) {
             .compute             = compute,
             .compute_scalar_f32  = compute_scalar_f32,
             .compute_scalar_f16  = compute_scalar_f16,
+            .row_scalar          = row_scalar,
+            .ne0                 = ne0,
+            .chunks_per_row      = chunks_per_row,
+            .row_start           = row_start,
+            .row_scalars         = vtcm_src1,
         };
 
         work_queue_run(octx->ctx->hvx_queue, binary_thread_chunked, &cctx, n_hvx);
