@@ -42,6 +42,7 @@ add_library(${HTP_LIB} SHARED
     top-k-mask-ops.c
     fill-ops.c
     timestep-ops.c
+    arange-ops.c
     concat-ops.c
     diag-ops.c
     solve-tri-ops.c

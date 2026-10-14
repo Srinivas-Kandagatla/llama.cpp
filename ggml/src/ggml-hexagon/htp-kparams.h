@@ -5,6 +5,7 @@
 #include "htp-lower.h"
 
 #include "htp/allreduce-ops.h"
+#include "htp/arange-ops.h"
 #include "htp/argsort-ops.h"
 #include "htp/binary-ops.h"
 #include "htp/concat-ops.h"

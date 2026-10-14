@@ -56,6 +56,7 @@ htp_op_code htp_op_remap(const struct ggml_tensor * t) {
         case GGML_OP_CUMSUM:          return HTP_OP_CUMSUM;
         case GGML_OP_TOP_K_MASK:      return HTP_OP_TOP_K_MASK;
         case GGML_OP_FILL:            return HTP_OP_FILL;
+        case GGML_OP_ARANGE:          return HTP_OP_ARANGE;
         case GGML_OP_DIAG:            return HTP_OP_DIAG;
         case GGML_OP_SOLVE_TRI:       return HTP_OP_SOLVE_TRI;
         case GGML_OP_DSV4_HC_PRE:     return HTP_OP_DSV4_HC_PRE;
@@ -4474,6 +4475,33 @@ static bool htp_kparams_solve_fill(
     return true;
 }
 
+static bool htp_kparams_solve_arange(
+    const struct ggml_hexagon_session * sess,
+    const struct ggml_tensor * op,
+    struct htp_arange_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    if (op->type != GGML_TYPE_F32 || !ggml_is_contiguous(op) || ggml_nelements(op) > UINT32_MAX) {
+        return false;
+    }
+
+    const uint64_t ne      = (uint64_t) ggml_nelements(op);
+    const uint64_t max_hvx = (std::max<uint64_t>)(1, (ne + HTP_ARANGE_MIN_ELEMS_PER_HVX - 1) / HTP_ARANGE_MIN_ELEMS_PER_HVX);
+    const uint32_t n_hvx   = (uint32_t) (std::min<uint64_t>)(htp_session_n_hvx(sess), max_hvx);
+
+    struct htp_arange_vtcm_layout L;
+    htp_arange_vtcm_layout_build(&L, n_hvx);
+    if (L.total_bytes > htp_session_vtcm_size(sess)) {
+        return false;
+    }
+
+    kparams->n_hvx     = n_hvx;
+    kparams->vtcm_size = (uint32_t) L.total_bytes;
+
+    return true;
+}
+
 static bool htp_kparams_solve_timestep_embedding(
     const struct ggml_hexagon_session * sess,
     const struct ggml_tensor * op,
@@ -6172,6 +6200,9 @@ bool htp_kparams_solve(
 
         case HTP_OP_FILL:
             return htp_kparams_invoke<htp_kparams_solve_fill>(sess, op, kparams);
+
+        case HTP_OP_ARANGE:
+            return htp_kparams_invoke<htp_kparams_solve_arange>(sess, op, kparams);
 
         case HTP_OP_ROLL:
             return htp_kparams_invoke<htp_kparams_solve_roll>(sess, op, kparams);
