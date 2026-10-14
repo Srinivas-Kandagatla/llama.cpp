@@ -130,6 +130,9 @@ enum htp_op_code {
     HTP_OP_SSM_SCAN,
     HTP_OP_TIMESTEP_EMBEDDING,
     HTP_OP_MUL_MAT_NX_GLU,
+    HTP_OP_UNARY_SIN,
+    HTP_OP_UNARY_COS,
+
     HTP_OP_INVALID
 };
 

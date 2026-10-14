@@ -75,4 +75,23 @@ static inline HVX_Vector hvx_vec_sin_f32(HVX_Vector x) {
     return vsin;
 }
 
+#define HVX_SINCOS_ARRAY_AA(NAME, VEC_FN)                                                         \
+    static inline void NAME(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) { \
+        HVX_Vector * restrict       vdst = (HVX_Vector *) dst;                                    \
+        const HVX_Vector * restrict vsrc = (const HVX_Vector *) src;                              \
+        const uint32_t              nvec = n / 32;                                                \
+        const uint32_t              nloe = n % 32;                                                \
+        uint32_t                    i    = 0;                                                     \
+        for (; i < nvec; i++) {                                                                   \
+            vdst[i] = VEC_FN(vsrc[i]);                                                            \
+        }                                                                                         \
+        if (nloe) {                                                                               \
+            hvx_vec_store_a((void *) &vdst[i], nloe * sizeof(float), VEC_FN(vsrc[i]));            \
+        }                                                                                         \
+    }
+
+// sin/cos over aligned f32 arrays (dst and src 128-byte aligned)
+HVX_SINCOS_ARRAY_AA(hvx_sin_f32_aa, hvx_vec_sin_f32)
+HVX_SINCOS_ARRAY_AA(hvx_cos_f32_aa, hvx_vec_cos_f32)
+
 #endif /* HVX_SIN_COS_H */

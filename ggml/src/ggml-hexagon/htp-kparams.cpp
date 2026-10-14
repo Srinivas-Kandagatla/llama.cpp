@@ -44,6 +44,8 @@ htp_op_code htp_op_remap(const struct ggml_tensor * t) {
         case GGML_OP_SQR:             return HTP_OP_SQR;
         case GGML_OP_SQRT:            return HTP_OP_SQRT;
         case GGML_OP_LOG:             return HTP_OP_UNARY_LOG;
+        case GGML_OP_SIN:             return HTP_OP_UNARY_SIN;
+        case GGML_OP_COS:             return HTP_OP_UNARY_COS;
         case GGML_OP_SOFT_MAX:        return HTP_OP_SOFTMAX;
         case GGML_OP_SSM_CONV:        return HTP_OP_SSM_CONV;
         case GGML_OP_SSM_SCAN:        return HTP_OP_SSM_SCAN;
