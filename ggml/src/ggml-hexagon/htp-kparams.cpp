@@ -29,6 +29,7 @@ htp_op_code htp_op_remap(const struct ggml_tensor * t) {
         case GGML_OP_SET_ROWS:        return HTP_OP_SET_ROWS;
         case GGML_OP_SUM:             return HTP_OP_SUM;
         case GGML_OP_SUM_ROWS:        return HTP_OP_SUM_ROWS;
+        case GGML_OP_MEAN:            return HTP_OP_MEAN;
         case GGML_OP_POOL_2D:         return HTP_OP_POOL_2D;
         case GGML_OP_POOL_1D:         return HTP_OP_POOL_1D;
         case GGML_OP_ARGSORT:         return HTP_OP_ARGSORT;
@@ -2284,7 +2285,7 @@ static bool htp_kparams_solve_sum_rows(
     const uint32_t src0_nrows   = ggml_nrows(src0);
     const uint32_t max_hvx_sess = htp_session_n_hvx(sess);
 
-    if (op->op == GGML_OP_SUM_ROWS) {
+    if (op->op == GGML_OP_SUM_ROWS || op->op == GGML_OP_MEAN) {
         if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) ||
             (dst->type  != GGML_TYPE_F32 && dst->type  != GGML_TYPE_F16)) {
             return false;
@@ -6152,6 +6153,7 @@ bool htp_kparams_solve(
             return htp_kparams_invoke<htp_kparams_solve_conv3d>(sess, op, kparams);
 
         case HTP_OP_SUM_ROWS:
+        case HTP_OP_MEAN:
         case HTP_OP_SUM:
         case HTP_OP_ARGMAX:
             return htp_kparams_invoke<htp_kparams_solve_sum_rows>(sess, op, kparams);

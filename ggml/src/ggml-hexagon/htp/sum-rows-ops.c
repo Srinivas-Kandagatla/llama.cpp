@@ -46,7 +46,8 @@ typedef void (*sum_rows_compute_fn_t)(
     uint8_t * restrict       dst,
     uint32_t                 ne00,
     uint32_t                 nrows,
-    size_t                   src_row_stride
+    size_t                   src_row_stride,
+    float                    scale
 );
 
 struct sum_rows_context {
@@ -68,6 +69,7 @@ struct sum_rows_context {
     uint32_t                                  src0_nrows;
     uint32_t                                  src0_nrows_per_hvx;
     uint32_t                                  block;
+    float                                     scale;  // 1 for SUM_ROWS, 1/ne00 for MEAN
 };
 
 static inline size_t sum_rows_row_offset(
@@ -158,16 +160,25 @@ static inline HVX_Vector hvx_row_reduce_sum_f16(const uint8_t * restrict src, ui
     return Q6_Vsf_equals_Vqf32(hvx_vec_reduce_sum_qf32(acc));
 }
 
+// scale the row sum (MEAN); SUM_ROWS passes 1 and keeps the exact sum
+static inline HVX_Vector sum_rows_scale(HVX_Vector sum_sf, float scale) {
+    if (scale == 1.0f) {
+        return sum_sf;
+    }
+    return Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(sum_sf, hvx_vec_splat_f32(scale)));
+}
+
 static void __attribute__((noinline)) sum_rows_block_f32_f32(
     const uint8_t * restrict src,
     uint8_t * restrict       dst,
     const uint32_t           ne00,
     const uint32_t           nrows,
-    const size_t             src_row_stride
+    const size_t             src_row_stride,
+    const float              scale
 ) {
     HVX_Vector * restrict v_dst = (HVX_Vector *) dst;
     for (uint32_t b = 0; b < nrows; ++b) {
-        const HVX_Vector     sum_sf = hvx_row_reduce_sum_f32(src + b * src_row_stride, ne00);
+        const HVX_Vector     sum_sf = sum_rows_scale(hvx_row_reduce_sum_f32(src + b * src_row_stride, ne00), scale);
         const uint32_t       b_off  = (b & 31u) * sizeof(float);
         const HVX_VectorPred b_mask = Q6_Q_vsetq_R(b_off);
         const HVX_VectorPred e_mask = Q6_Q_vsetq2_R(b_off + sizeof(float));
@@ -180,11 +191,12 @@ static void __attribute__((noinline)) sum_rows_block_f32_f16(
     uint8_t * restrict       dst,
     const uint32_t           ne00,
     const uint32_t           nrows,
-    const size_t             src_row_stride
+    const size_t             src_row_stride,
+    const float              scale
 ) {
     HVX_Vector * restrict v_dst = (HVX_Vector *) dst;
     for (uint32_t b = 0; b < nrows; ++b) {
-        const HVX_Vector     sum_sf = hvx_vec_clamp_f16_f32(hvx_row_reduce_sum_f32(src + b * src_row_stride, ne00));
+        const HVX_Vector     sum_sf = hvx_vec_clamp_f16_f32(sum_rows_scale(hvx_row_reduce_sum_f32(src + b * src_row_stride, ne00), scale));
         const HVX_Vector     sum_hf = hvx_vec_f32_to_f16_shuff(sum_sf, sum_sf);
         const uint32_t       b_off  = (b & 63u) * sizeof(__fp16);
         const HVX_VectorPred b_mask = Q6_Q_vsetq_R(b_off);
@@ -198,11 +210,12 @@ static void __attribute__((noinline)) sum_rows_block_f16_f32(
     uint8_t * restrict       dst,
     const uint32_t           ne00,
     const uint32_t           nrows,
-    const size_t             src_row_stride
+    const size_t             src_row_stride,
+    const float              scale
 ) {
     HVX_Vector * restrict v_dst = (HVX_Vector *) dst;
     for (uint32_t b = 0; b < nrows; ++b) {
-        const HVX_Vector     sum_sf = hvx_row_reduce_sum_f16(src + b * src_row_stride, ne00);
+        const HVX_Vector     sum_sf = sum_rows_scale(hvx_row_reduce_sum_f16(src + b * src_row_stride, ne00), scale);
         const uint32_t       b_off  = (b & 31u) * sizeof(float);
         const HVX_VectorPred b_mask = Q6_Q_vsetq_R(b_off);
         const HVX_VectorPred e_mask = Q6_Q_vsetq2_R(b_off + sizeof(float));
@@ -215,11 +228,12 @@ static void __attribute__((noinline)) sum_rows_block_f16_f16(
     uint8_t * restrict       dst,
     const uint32_t           ne00,
     const uint32_t           nrows,
-    const size_t             src_row_stride
+    const size_t             src_row_stride,
+    const float              scale
 ) {
     HVX_Vector * restrict v_dst = (HVX_Vector *) dst;
     for (uint32_t b = 0; b < nrows; ++b) {
-        const HVX_Vector     sum_sf = hvx_vec_clamp_f16_f32(hvx_row_reduce_sum_f16(src + b * src_row_stride, ne00));
+        const HVX_Vector     sum_sf = hvx_vec_clamp_f16_f32(sum_rows_scale(hvx_row_reduce_sum_f16(src + b * src_row_stride, ne00), scale));
         const HVX_Vector     sum_hf = hvx_vec_f32_to_f16_shuff(sum_sf, sum_sf);
         const uint32_t       b_off  = (b & 63u) * sizeof(__fp16);
         const HVX_VectorPred b_mask = Q6_Q_vsetq_R(b_off);
@@ -232,6 +246,7 @@ struct sum_rows_pipe_state {
     dma_addr_t                    data_src;
     dma_addr_t                    data_dst;
     sum_rows_compute_fn_t         compute;
+    float                         scale;
     size_t                        src0_data_row_size;
     size_t                        src0_row_size_aligned;
     size_t                        dst_elem_size;
@@ -274,7 +289,7 @@ static void sum_rows_push_in(dma_queue * dma_q, void * ctx, const struct dma_pip
 
 static void sum_rows_pipe_compute(void * ctx, const struct dma_pipe_task * task, void * out_spad, void * in_spad) {
     struct sum_rows_pipe_state * s = (struct sum_rows_pipe_state *) ctx;
-    s->compute((const uint8_t *) in_spad, (uint8_t *) out_spad, s->ne00, task->len, s->src0_row_size_aligned);
+    s->compute((const uint8_t *) in_spad, (uint8_t *) out_spad, s->ne00, task->len, s->src0_row_size_aligned, s->scale);
 }
 
 static void sum_rows_push_out(dma_queue * dma_q, void * ctx, const struct dma_pipe_task * task, void * out_spad) {
@@ -310,6 +325,7 @@ static void sum_rows_thread(const htp_thread_t * th, unsigned int nth, unsigned 
         .data_src              = smctx->data_src0,
         .data_dst              = smctx->data_dst,
         .compute               = smctx->compute,
+        .scale                 = smctx->scale,
         .src0_data_row_size    = smctx->src0_data_row_size,
         .src0_row_size_aligned = smctx->src0_row_size_aligned,
         .dst_elem_size         = smctx->dst_elem_size,
@@ -332,7 +348,7 @@ static void sum_rows_thread(const htp_thread_t * th, unsigned int nth, unsigned 
                     sum_rows_next_task, sum_rows_push_in, sum_rows_pipe_compute, sum_rows_push_out);
 }
 
-int op_sum_rows(struct htp_ops_context * octx) {
+static int op_sum_rows_impl(struct htp_ops_context * octx, bool mean) {
     sum_rows_preamble;
 
     const bool src0_f16 = (src0->type == HTP_TYPE_F16);
@@ -412,11 +428,20 @@ int op_sum_rows(struct htp_ops_context * octx) {
         .src0_nrows             = nrows,
         .src0_nrows_per_hvx     = rows_per_hvx,
         .block                  = kparams->block,
+        .scale                  = mean ? 1.0f / (float) ne00 : 1.0f,
     };
 
     work_queue_run(octx->ctx->hvx_queue, sum_rows_thread, &smctx, n_hvx);
 
     return HTP_STATUS_OK;
+}
+
+int op_sum_rows(struct htp_ops_context * octx) {
+    return op_sum_rows_impl(octx, false);
+}
+
+int op_mean(struct htp_ops_context * octx) {
+    return op_sum_rows_impl(octx, true);
 }
 
 static float __attribute__((noinline)) hvx_sum_chunk_f32(const uint8_t * restrict src, uint32_t num_elems) {
