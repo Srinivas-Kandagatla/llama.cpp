@@ -8,6 +8,7 @@
 #include "htp/arange-ops.h"
 #include "htp/argsort-ops.h"
 #include "htp/binary-ops.h"
+#include "htp/col2im-ops.h"
 #include "htp/concat-ops.h"
 #include "htp/conv2d-ops.h"
 #include "htp/cpy-ops.h"

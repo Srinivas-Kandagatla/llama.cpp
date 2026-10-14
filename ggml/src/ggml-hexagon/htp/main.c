@@ -1069,6 +1069,9 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_PAD_REFLECT_1D:
             return op_pad_reflect_1d(octx);
 
+        case HTP_OP_COL2IM_1D:
+            return op_col2im_1d(octx);
+
         case HTP_OP_DIAG:
             return op_diag(octx);
 

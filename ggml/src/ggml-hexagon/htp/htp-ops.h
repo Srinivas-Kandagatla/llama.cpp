@@ -135,6 +135,7 @@ enum htp_op_code {
     HTP_OP_MEAN,
     HTP_OP_ARANGE,
     HTP_OP_PAD_REFLECT_1D,
+    HTP_OP_COL2IM_1D,
 
     HTP_OP_INVALID
 };

@@ -44,6 +44,7 @@ add_library(${HTP_LIB} SHARED
     timestep-ops.c
     arange-ops.c
     pad-reflect-ops.c
+    col2im-ops.c
     concat-ops.c
     diag-ops.c
     solve-tri-ops.c

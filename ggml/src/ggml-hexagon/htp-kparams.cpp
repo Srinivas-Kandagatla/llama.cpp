@@ -58,6 +58,7 @@ htp_op_code htp_op_remap(const struct ggml_tensor * t) {
         case GGML_OP_FILL:            return HTP_OP_FILL;
         case GGML_OP_ARANGE:          return HTP_OP_ARANGE;
         case GGML_OP_PAD_REFLECT_1D:  return HTP_OP_PAD_REFLECT_1D;
+        case GGML_OP_COL2IM_1D:       return HTP_OP_COL2IM_1D;
         case GGML_OP_DIAG:            return HTP_OP_DIAG;
         case GGML_OP_SOLVE_TRI:       return HTP_OP_SOLVE_TRI;
         case GGML_OP_DSV4_HC_PRE:     return HTP_OP_DSV4_HC_PRE;
@@ -4642,6 +4643,51 @@ static bool htp_kparams_solve_pad_reflect_1d(
     return true;
 }
 
+static bool htp_kparams_solve_col2im_1d(
+    const struct ggml_hexagon_session * sess,
+    const struct ggml_tensor * op,
+    struct htp_col2im_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const struct ggml_tensor * src0 = op->src[0];
+    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    const int32_t s0 = ((const int32_t *) op->op_params)[0];
+    const int32_t oc = ((const int32_t *) op->op_params)[1];
+    if (s0 <= 0 || oc <= 0 || src0->ne[0] % oc != 0) {
+        return false;
+    }
+    const uint32_t K = (uint32_t) (src0->ne[0] / oc);
+
+    const uint32_t t_out = (uint32_t) op->ne[0];
+    const size_t   vtcm  = htp_session_vtcm_size(sess);
+    const uint32_t n_hvx = (std::min)(htp_session_n_hvx(sess), (std::max)(1u, (t_out + HTP_COL2IM_T_ALIGN - 1) / HTP_COL2IM_T_ALIGN));
+
+    uint32_t chunk_t = (std::min)(512u, (uint32_t) hex_round_up((std::max)(1u, t_out), HTP_COL2IM_T_ALIGN));
+
+    struct htp_col2im_vtcm_layout L;
+    htp_col2im_vtcm_layout_build(&L, chunk_t, K, (uint32_t) s0, n_hvx);
+    while (L.total_bytes > vtcm && chunk_t > HTP_COL2IM_T_ALIGN) {
+        chunk_t = (std::max)((uint32_t) HTP_COL2IM_T_ALIGN, (chunk_t / 2) & ~(uint32_t) (HTP_COL2IM_T_ALIGN - 1));
+        htp_col2im_vtcm_layout_build(&L, chunk_t, K, (uint32_t) s0, n_hvx);
+    }
+    if (L.total_bytes > vtcm) {
+        return false;
+    }
+
+    kparams->n_hvx     = n_hvx;
+    kparams->chunk_t   = chunk_t;
+    kparams->vtcm_size = (uint32_t) L.total_bytes;
+
+    return true;
+}
+
 static bool htp_kparams_solve_roll(
     const struct ggml_hexagon_session * sess,
     const struct ggml_tensor * op,
@@ -6258,6 +6304,9 @@ bool htp_kparams_solve(
 
         case HTP_OP_PAD_REFLECT_1D:
             return htp_kparams_invoke<htp_kparams_solve_pad_reflect_1d>(sess, op, kparams);
+
+        case HTP_OP_COL2IM_1D:
+            return htp_kparams_invoke<htp_kparams_solve_col2im_1d>(sess, op, kparams);
 
         case HTP_OP_ROLL:
             return htp_kparams_invoke<htp_kparams_solve_roll>(sess, op, kparams);
