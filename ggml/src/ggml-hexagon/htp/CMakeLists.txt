@@ -43,6 +43,7 @@ add_library(${HTP_LIB} SHARED
     fill-ops.c
     timestep-ops.c
     arange-ops.c
+    pad-reflect-ops.c
     concat-ops.c
     diag-ops.c
     solve-tri-ops.c

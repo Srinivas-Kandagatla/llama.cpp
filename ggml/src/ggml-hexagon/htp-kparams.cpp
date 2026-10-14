@@ -57,6 +57,7 @@ htp_op_code htp_op_remap(const struct ggml_tensor * t) {
         case GGML_OP_TOP_K_MASK:      return HTP_OP_TOP_K_MASK;
         case GGML_OP_FILL:            return HTP_OP_FILL;
         case GGML_OP_ARANGE:          return HTP_OP_ARANGE;
+        case GGML_OP_PAD_REFLECT_1D:  return HTP_OP_PAD_REFLECT_1D;
         case GGML_OP_DIAG:            return HTP_OP_DIAG;
         case GGML_OP_SOLVE_TRI:       return HTP_OP_SOLVE_TRI;
         case GGML_OP_DSV4_HC_PRE:     return HTP_OP_DSV4_HC_PRE;
@@ -4590,6 +4591,57 @@ static bool htp_kparams_solve_timestep_embedding(
     return true;
 }
 
+static bool htp_kparams_solve_pad_reflect_1d(
+    const struct ggml_hexagon_session * sess,
+    const struct ggml_tensor * op,
+    struct htp_pad_reflect_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const struct ggml_tensor * src0 = op->src[0];
+    const int32_t p0 = ((const int32_t *) op->op_params)[0];
+    const int32_t p1 = ((const int32_t *) op->op_params)[1];
+
+    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->nb[0] != sizeof(float) || op->nb[0] != sizeof(float)) {
+        return false;
+    }
+    if (p0 < 0 || p1 < 0 || p0 >= src0->ne[0] || p1 >= src0->ne[0]) {
+        return false;
+    }
+
+    const uint32_t nrows  = (uint32_t) (src0->ne[1] * src0->ne[2] * src0->ne[3]);
+    const size_t   vtcm   = htp_session_vtcm_size(sess);
+    uint32_t       n_hvx  = (std::min)(htp_session_n_hvx(sess), (std::max)(1u, nrows));
+
+    const uint32_t rows_per_hvx = (nrows + n_hvx - 1) / n_hvx;
+    const size_t   row_bytes    = hex_round_up((size_t) src0->ne[0] * sizeof(float), 128) +
+                                  hex_round_up((size_t) op->ne[0] * sizeof(float), 128);
+    const uint32_t max_block    = (std::min)(rows_per_hvx, (uint32_t) src0->ne[1]);
+    uint32_t       block        = (uint32_t) (std::min<size_t>)(max_block, (std::max<size_t>)(1, vtcm / (2 * row_bytes * n_hvx)));
+
+    struct htp_pad_reflect_vtcm_layout L;
+    htp_pad_reflect_vtcm_layout_build(&L, (uint32_t) src0->ne[0], (uint32_t) op->ne[0], block, n_hvx);
+    while (L.total_bytes > vtcm && n_hvx > 1) {
+        n_hvx--;
+        htp_pad_reflect_vtcm_layout_build(&L, (uint32_t) src0->ne[0], (uint32_t) op->ne[0], block, n_hvx);
+    }
+    if (L.total_bytes > vtcm) {
+        return false;
+    }
+
+    kparams->n_hvx     = n_hvx;
+    kparams->block     = block;
+    kparams->vtcm_size = (uint32_t) L.total_bytes;
+    kparams->div_ne1   = init_fastdiv_values((uint32_t) src0->ne[1]);
+    kparams->div_ne2   = init_fastdiv_values((uint32_t) src0->ne[2]);
+    kparams->div_ne12  = init_fastdiv_values((uint32_t) (src0->ne[1] * src0->ne[2]));
+
+    return true;
+}
+
 static bool htp_kparams_solve_roll(
     const struct ggml_hexagon_session * sess,
     const struct ggml_tensor * op,
@@ -6203,6 +6255,9 @@ bool htp_kparams_solve(
 
         case HTP_OP_ARANGE:
             return htp_kparams_invoke<htp_kparams_solve_arange>(sess, op, kparams);
+
+        case HTP_OP_PAD_REFLECT_1D:
+            return htp_kparams_invoke<htp_kparams_solve_pad_reflect_1d>(sess, op, kparams);
 
         case HTP_OP_ROLL:
             return htp_kparams_invoke<htp_kparams_solve_roll>(sess, op, kparams);

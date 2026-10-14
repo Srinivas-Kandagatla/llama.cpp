@@ -23,6 +23,7 @@
 #include "htp/lightning-indexer-ops.h"
 #include "htp/matmul-ops.h"
 #include "htp/pad-ops.h"
+#include "htp/pad-reflect-ops.h"
 #include "htp/pool-ops.h"
 #include "htp/repeat-ops.h"
 #include "htp/roll-ops.h"
