@@ -63,7 +63,18 @@ static inline HVX_Vector hvx_vec_rsqrt_f32(HVX_Vector in_vec) {
     return Q6_Vsf_equals_Vqf32(temp);
 }
 
-// Compute sqrt(x) as x*inv_sqrt(x)
+// sqrt(x) as x * rsqrt(x). rsqrt(+-0) is the bit-trick estimate pushed through the Newton steps at the edge of
+// the float range; depending on how the compiler schedules the qf32 math it overflows to inf, and 0 * inf gives
+// NaN (seen in the remainder iterations of the unrolled loops). Return x for +-0 (sqrt(+-0) = +-0) and NaN for
+// negative x, like IEEE sqrt.
+static inline HVX_Vector hvx_vec_sqrt_f32(HVX_Vector x) {
+    HVX_Vector     res     = HVX_OP_MUL(hvx_vec_rsqrt_f32(x), x);
+    HVX_VectorPred is_neg  = Q6_Q_vcmp_gt_VwVw(Q6_V_vzero(), x);   // sign bit set
+    HVX_VectorPred is_zero = Q6_Q_vcmp_eq_VwVw(Q6_V_vand_VV(x, Q6_V_vsplat_R(0x7fffffff)), Q6_V_vzero());
+    res = Q6_V_vmux_QVV(is_neg, Q6_V_vsplat_R(0x7fc00000), res);
+    return Q6_V_vmux_QVV(is_zero, x, res);
+}
+
 #define hvx_sqrt_f32_loop_body(dst_type, src_type, vec_store)                \
     do {                                                                     \
         dst_type * restrict vdst = (dst_type *) dst;                         \
@@ -76,13 +87,10 @@ static inline HVX_Vector hvx_vec_rsqrt_f32(HVX_Vector in_vec) {
                                                                              \
         _Pragma("unroll(4)")                                                 \
         for (; i < nvec; i++) {                                              \
-            HVX_Vector inv_sqrt = hvx_vec_rsqrt_f32(vsrc[i]);                \
-            HVX_Vector sqrt_res = HVX_OP_MUL(inv_sqrt, vsrc[i]);             \
-            vdst[i] = sqrt_res;                                              \
+            vdst[i] = hvx_vec_sqrt_f32(vsrc[i]);                             \
         }                                                                    \
         if (nloe) {                                                          \
-            HVX_Vector inv_sqrt = hvx_vec_rsqrt_f32(vsrc[i]);                \
-            HVX_Vector sqrt_res = HVX_OP_MUL(inv_sqrt, vsrc[i]);             \
+            HVX_Vector sqrt_res = hvx_vec_sqrt_f32(vsrc[i]);                 \
             vec_store((void *) &vdst[i], nloe * SIZEOF_FP32, sqrt_res);      \
         }                                                                    \
     } while(0)
@@ -137,14 +145,14 @@ static inline void hvx_sqrt_f32(uint8_t * restrict dst, const uint8_t * restrict
         _Pragma("unroll(4)")                                                           \
         for (; i < nvec; i++) {                                                        \
             HVX_VectorPair p = hvx_vec_f16_to_f32(vsrc[i]);                            \
-            HVX_Vector r0 = HVX_OP_MUL(hvx_vec_rsqrt_f32(Q6_V_lo_W(p)), Q6_V_lo_W(p)); \
-            HVX_Vector r1 = HVX_OP_MUL(hvx_vec_rsqrt_f32(Q6_V_hi_W(p)), Q6_V_hi_W(p)); \
+            HVX_Vector r0 = hvx_vec_sqrt_f32(Q6_V_lo_W(p));                            \
+            HVX_Vector r1 = hvx_vec_sqrt_f32(Q6_V_hi_W(p));                            \
             vdst[i] = hvx_vec_f32_to_f16(r0, r1);                                      \
         }                                                                              \
         if (nloe) {                                                                    \
             HVX_VectorPair p = hvx_vec_f16_to_f32(vsrc[i]);                            \
-            HVX_Vector r0 = HVX_OP_MUL(hvx_vec_rsqrt_f32(Q6_V_lo_W(p)), Q6_V_lo_W(p)); \
-            HVX_Vector r1 = HVX_OP_MUL(hvx_vec_rsqrt_f32(Q6_V_hi_W(p)), Q6_V_hi_W(p)); \
+            HVX_Vector r0 = hvx_vec_sqrt_f32(Q6_V_lo_W(p));                            \
+            HVX_Vector r1 = hvx_vec_sqrt_f32(Q6_V_hi_W(p));                            \
             HVX_Vector v = hvx_vec_f32_to_f16(r0, r1);                                 \
             vec_store((void *) &vdst[i], nloe * SIZEOF_FP16, v);                       \
         }                                                                              \

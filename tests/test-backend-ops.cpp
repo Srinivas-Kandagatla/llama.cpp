@@ -6925,18 +6925,22 @@ struct test_sqr : public test_case {
 struct test_sqrt : public test_case {
     const ggml_type type;
     const std::array<int64_t, 4> ne;
+    const bool zeros; // every other element is +0
 
     std::string vars() override {
-        return VARS_TO_STR2(type, ne);
+        return VARS_TO_STR3(type, ne, zeros);
     }
 
     test_sqrt(ggml_type type = GGML_TYPE_F32,
-            std::array<int64_t, 4> ne = {10, 3, 3, 2})
-        : type(type), ne(ne) {}
+            std::array<int64_t, 4> ne = {10, 3, 3, 2},
+            bool zeros = false)
+        : type(type), ne(ne), zeros(zeros) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * a = ggml_new_tensor(ctx, type, 4, ne.data());
-        ggml_set_param(a);
+        if (!zeros) {
+            ggml_set_param(a); // the gradient of sqrt is infinite at 0
+        }
         ggml_set_name(a, "a");
 
         ggml_tensor * out = ggml_sqrt(ctx, a);
@@ -6949,6 +6953,20 @@ struct test_sqrt : public test_case {
         // fill with positive values
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             init_tensor_uniform(t, 50.0f, 100.0f);
+            if (!zeros) {
+                continue;
+            }
+            std::vector<float> data = tensor_to_float(t);
+            for (size_t i = 0; i < data.size(); i += 2) {
+                data[i] = 0.0f;
+            }
+            if (t->type == GGML_TYPE_F16) {
+                std::vector<ggml_fp16_t> data_f16(data.size());
+                ggml_fp32_to_fp16_row(data.data(), data_f16.data(), data.size());
+                ggml_backend_tensor_set(t, data_f16.data(), 0, ggml_nbytes(t));
+            } else {
+                ggml_backend_tensor_set(t, data.data(), 0, ggml_nbytes(t));
+            }
         }
     }
 
@@ -13756,6 +13774,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_sqr       (type, {1024, 1024, 1, 1}));
         test_cases.emplace_back(new test_sqrt      (type, {7, 1, 5, 3}));
         test_cases.emplace_back(new test_sqrt      (type, {1024, 1024, 1, 1}));
+        // exact zeros, rows long enough for the tail of an unrolled vector loop
+        test_cases.emplace_back(new test_sqrt      (type, {480, 4, 1, 1}, true));
+        test_cases.emplace_back(new test_sqrt      (type, {100, 3, 2, 1}, true));
         test_cases.emplace_back(new test_log       (type, {7, 1, 5, 3}));
         test_cases.emplace_back(new test_log       (type, {1024, 1024, 1, 1}));
         test_cases.emplace_back(new test_sin       (type, {7, 1, 5, 3}));
