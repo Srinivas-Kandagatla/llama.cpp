@@ -635,6 +635,7 @@ public:
         prompt_pos = 0;
         step_idx = 0;
         eos_step = -1;
+        eos_run = 0;
         chunks.clear();
         chunk_idx = 0;
         n_voice_pos = 0;
@@ -760,8 +761,12 @@ public:
             LOG_ERR("mtmd_helper_gen_audio: flow decode failed\n");
             return 1;
         }
-        if (out.is_eos && eos_step < 0) {
-            eos_step = step_idx;
+        // a single frame over the threshold is not trusted: the eos score can graze it mid-sentence
+        // (-4.06 vs -4.0 on CPU, -3.88 on HTP with fp16 drift), a real end stays over it for several frames.
+        // the latch goes back to the first frame of the run, so the tail is the reference's
+        eos_run = out.is_eos ? eos_run + 1 : 0;
+        if (eos_run >= 2 && eos_step < 0) {
+            eos_step = step_idx - 1;
         }
         // the frame of the stopping step is discarded, matching _autoregressive_generation().
         // the budget is the reference's fallback for a chunk whose eos head never fires
@@ -974,6 +979,7 @@ private:
         frames_after_eos = pack.frames_after_eos > 0 ? pack.frames_after_eos : (n_tok <= 6 ? 5 : 3);
         step_idx = 0;
         eos_step = -1;
+        eos_run = 0;
     }
 
     // ends the current chunk and, if there is another, re-prompts it on top of the voice
@@ -1103,6 +1109,7 @@ private:
     // end-of-speech is latched, then a few more frames are generated as tail padding
     int step_idx = 0;
     int eos_step = -1;
+    int eos_run = 0;
     int frames_after_eos = 3;
     static constexpr int max_chunk_tokens = 50;  // MAX_TOKEN_PER_CHUNK in the reference
     static constexpr double frame_rate    = 12.5;
