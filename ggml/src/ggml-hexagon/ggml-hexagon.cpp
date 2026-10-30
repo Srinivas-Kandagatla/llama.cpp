@@ -720,6 +720,14 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
     HEX_VERBOSE("ggml-hex: %s get-tensor %s : data %p offset %zu size %zu usage %d flags 0x%x\n",
             sess->c_name(), tensor->name, data, offset, size, (int) buffer->usage, flags);
 
+    // A view of a tiled tensor has no TILED flag of its own, but its bytes are in the
+    // tiled layout of the base tensor. Read it through the base so the data is un-tiled.
+    const ggml_tensor * base = tensor->view_src;
+    if (base && ggml_hexagon_tensor_is_tiled(base)) {
+        htp_unpack_tensor_tiled(data, base, tensor->view_offs + offset, size);
+        return;
+    }
+
     if (flags & HTP_TENSOR_TILED) {
         htp_unpack_tensor_tiled(data, tensor, offset, size);
         return;
@@ -789,6 +797,14 @@ static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buff
 
     HEX_VERBOSE("ggml-hex: %s get-tensor-2d %s : data %p offset %zu size %zu n_copies %zu stride_tensor %zu stride_data %zu usage %d\n",
                 sess->c_name(), tensor->name, data, offset, size, n_copies, stride_tensor, stride_data, (int) buffer->usage);
+
+    // Same as get_tensor: read a view of a tiled tensor through the base.
+    const ggml_tensor * base = tensor->view_src;
+    if (base && ggml_hexagon_tensor_is_tiled(base)) {
+        ggml_backend_hexagon_buffer_get_tensor_2d(buffer, base, data, tensor->view_offs + offset, size,
+                                                  n_copies, stride_tensor, stride_data);
+        return;
+    }
 
     if ((flags & HTP_TENSOR_TILED) == 0) {
         if (htp_tensor_is_stored_f16(tensor)) {
