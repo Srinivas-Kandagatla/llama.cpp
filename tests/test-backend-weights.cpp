@@ -2,13 +2,16 @@
 // layout (for example repacked into tiles). Views of such weights must still behave like views of
 // the plain ggml layout:
 //   - ggml_backend_tensor_get() on a view returns the same bytes that were uploaded
+//   - GET_ROWS on a view, run through the scheduler, returns the same rows as the CPU
 //
 // usage: test-backend-weights [-b <device name>]   (default: every non-CPU device)
 
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "ggml-cpu.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,6 +48,16 @@ static std::vector<uint8_t> make_weight_bytes(ggml_type type, const std::vector<
     return out;
 }
 
+static std::vector<float> row_to_f32(ggml_type type, const uint8_t * row, int64_t ne0) {
+    std::vector<float> out(ne0);
+    if (type == GGML_TYPE_F32) {
+        memcpy(out.data(), row, ne0 * sizeof(float));
+    } else {
+        ggml_get_type_traits(type)->to_float(row, out.data(), ne0);
+    }
+    return out;
+}
+
 // views of the weight, read directly with ggml_backend_tensor_get
 static void test_view_reads(const weight_case & wc, ggml_tensor * w, const std::vector<uint8_t> & bytes) {
     ggml_init_params params = { ggml_tensor_overhead() * (wc.ne2 + 1), nullptr, true };
@@ -73,11 +86,64 @@ static void test_view_reads(const weight_case & wc, ggml_tensor * w, const std::
     ggml_free(ctx);
 }
 
+// GET_ROWS on views of the weight, through the scheduler (device + CPU)
+static void test_view_get_rows(const weight_case & wc, ggml_tensor * w, const std::vector<uint8_t> & bytes,
+                               ggml_backend_t backend, ggml_backend_t cpu) {
+    const int64_t n_ids = 5;
+
+    ggml_init_params params = { ggml_tensor_overhead() * (4 * wc.ne2 + 8) + ggml_graph_overhead(), nullptr, true };
+    ggml_context * ctx = ggml_init(params);
+
+    ggml_tensor * ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_ids);
+    ggml_set_name(ids, "ids");
+    ggml_set_input(ids);
+
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+    std::vector<ggml_tensor *> outs;
+    for (int64_t k = 0; k < wc.ne2; k++) {
+        ggml_tensor * v   = ggml_view_2d(ctx, w, wc.ne0, wc.ne1, w->nb[1], k * w->nb[2]);
+        ggml_tensor * out = ggml_get_rows(ctx, v, ids);
+        ggml_set_output(out);
+        ggml_build_forward_expand(gf, out);
+        outs.push_back(out);
+    }
+
+    ggml_backend_t backends[2] = { backend, cpu };
+    ggml_backend_sched_t sched = ggml_backend_sched_new(backends, nullptr, 2, GGML_DEFAULT_GRAPH_SIZE, false, true);
+    GGML_ASSERT(ggml_backend_sched_alloc_graph(sched, gf));
+
+    const int32_t id_vals[n_ids] = { 0, (int32_t) wc.ne1 - 1, 3, (int32_t) wc.ne1 / 2, 1 };
+    ggml_backend_tensor_set(ids, id_vals, 0, sizeof(id_vals));
+
+    GGML_ASSERT(ggml_backend_sched_graph_compute(sched, gf) == GGML_STATUS_SUCCESS);
+
+    const size_t row_size = ggml_row_size(wc.type, wc.ne0);
+    for (int64_t k = 0; k < wc.ne2; k++) {
+        std::vector<float> got(wc.ne0 * n_ids);
+        ggml_backend_tensor_get(outs[k], got.data(), 0, got.size() * sizeof(float));
+        for (int64_t i = 0; i < n_ids; i++) {
+            const uint8_t * src = bytes.data() + k * w->nb[2] + id_vals[i] * row_size;
+            std::vector<float> ref = row_to_f32(wc.type, src, wc.ne0);
+            float max_err = 0.0f;
+            for (int64_t j = 0; j < wc.ne0; j++) {
+                const float e = std::fabs(got[i * wc.ne0 + j] - ref[j]);
+                max_err = std::isnan(e) ? INFINITY : std::fmax(max_err, e);
+            }
+            CHECK(max_err <= 1e-6f, "%s: GET_ROWS of view %lld row %d: max abs err %g",
+                  ggml_type_name(wc.type), (long long) k, id_vals[i], max_err);
+        }
+    }
+
+    ggml_backend_sched_free(sched);
+    ggml_free(ctx);
+}
+
 static void test_device(ggml_backend_dev_t dev) {
     printf("device %s (%s)\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
 
     ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
-    GGML_ASSERT(backend);
+    ggml_backend_t cpu     = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    GGML_ASSERT(backend && cpu);
 
     // 3D weights viewed one slice at a time (like per-codebook embedding tables).
     // No F32: a backend may keep F32 weights at reduced precision (Hexagon tiles them as F16),
@@ -111,6 +177,7 @@ static void test_device(ggml_backend_dev_t dev) {
         ggml_backend_tensor_set(w, bytes.data(), 0, bytes.size());
 
         test_view_reads(wc, w, bytes);
+        test_view_get_rows(wc, w, bytes, backend, cpu);
 
         printf("  %-5s [%lld, %lld, %lld]: %s\n", ggml_type_name(wc.type), (long long) wc.ne0, (long long) wc.ne1,
                (long long) wc.ne2, n_failed == n_failed_before ? "OK" : "FAIL");
@@ -119,6 +186,7 @@ static void test_device(ggml_backend_dev_t dev) {
         ggml_free(ctx_w);
     }
 
+    ggml_backend_free(cpu);
     ggml_backend_free(backend);
 }
 

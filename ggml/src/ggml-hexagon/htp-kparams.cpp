@@ -1885,6 +1885,15 @@ bool htp_kparams_solve_repeat_get_rows(
         return false;
     }
 
+    // A view of a tiled weight has no TILED flag of its own, but its bytes are in the tiled layout
+    // of the base tensor. The kernel choice below only sees the view, so it would run the flat
+    // kernel on tiled bytes. Leave such views to the CPU, which reads them through get_tensor.
+    // Weights are tiled at graph time, so check whether the base will be tiled, not only whether it is.
+    const struct ggml_tensor * base = src0->view_src;
+    if (base && ggml_hexagon_tensor_will_tile(base)) {
+        return false;
+    }
+
     const bool tiled = ggml_hexagon_tensor_is_tiled(src0);
 
     if (src0->type == GGML_TYPE_I32) {
