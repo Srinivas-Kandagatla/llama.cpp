@@ -2634,6 +2634,13 @@ static void ggml_hexagon_tensor_repack(ggml_tensor * tensor, ggml_hexagon_sessio
 }
 
 static void ggml_hexagon_graph_repack(const ggml_cgraph * graph, ggml_hexagon_session * sess) {
+    // mark the weights first so that no other MUL_MAT on the same weight tiles it
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        ggml_tensor * n = graph->nodes[i];
+        if (ggml_hexagon_op_is_compute(n) && htp_mm_needs_f32_src1(n) && !ggml_hexagon_tensor_is_tiled(n->src[0])) {
+            ggml_hexagon_tensor_set_flags(n->src[0], HTP_TENSOR_KEEP_FLAT);
+        }
+    }
     for (int i = 0; i < graph->n_nodes; ++i) {
         ggml_tensor * n = graph->nodes[i];
         if (!ggml_hexagon_op_is_compute(n)) {

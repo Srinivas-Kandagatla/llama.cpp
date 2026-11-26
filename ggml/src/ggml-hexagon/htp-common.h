@@ -115,8 +115,19 @@ static inline struct ggml_tensor htp_tensor_lower_f16(const struct ggml_tensor *
     return m;
 }
 
+// MUL_MAT with an F32 weight and an F32 precision request for src1: only the flat F32 kernel keeps src1 in F32
+static inline bool htp_mm_needs_f32_src1(const struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    return dst->op == GGML_OP_MUL_MAT && src0->type == GGML_TYPE_F32 &&
+           (ggml_hexagon_tensor_get_flags(src0) & HTP_TENSOR_WEIGHT) &&
+           ggml_prec_get_src(dst, 1) == GGML_PREC_F32;
+}
+
 static inline bool ggml_hexagon_tensor_can_tile(const struct ggml_tensor * t) {
     if (opt_rt_repack == 0) {
+        return false;
+    }
+    if (ggml_hexagon_tensor_get_flags(t) & HTP_TENSOR_KEEP_FLAT) {
         return false;
     }
     if (!ggml_op_is_empty(t->op)) {

@@ -1070,7 +1070,10 @@ static bool htp_matmul_check_types(
     }
 
     if (ggml_prec_get_src(dst, 1) == GGML_PREC_BF16 || ggml_prec_get_src(dst, 1) == GGML_PREC_F32) {
-        return false;
+        // the flat F32 kernel keeps src1 in F32, so it can take an F32 weight that is not tiled
+        if (!htp_mm_needs_f32_src1(dst) || ggml_hexagon_tensor_is_tiled(src0)) {
+            return false;
+        }
     }
 
     if (is_matmul_id) {

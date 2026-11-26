@@ -168,6 +168,7 @@ enum htp_tensor_flags {
     HTP_TENSOR_FENCE       = (1U << 2), // Tensor is synchronization fence (explicitly managed)
     HTP_TENSOR_FUSEABLE    = (1U << 3), // Tensor can be fused (host-only)
     HTP_TENSOR_LOWERED_F16 = (1U << 4), // F32 tensor lowered in-place to F16 (host-only)
+    HTP_TENSOR_KEEP_FLAT   = (1U << 5), // F32 weight kept flat for a MUL_MAT that needs F32 src1 (host-only)
 };
 
 enum htp_buf_flags {
