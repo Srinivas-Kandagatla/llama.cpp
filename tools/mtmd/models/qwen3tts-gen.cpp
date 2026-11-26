@@ -189,6 +189,10 @@ ggml_tensor * mtmd_graph_qwen3tts_gen::code_gen::layer_forward(
     ggml_tensor * up   = ggml_mul_mat(ctx0, layer.ff_up_w, h2);
     ggml_tensor * gu   = ggml_swiglu_split(ctx0, gate, up);
     ggml_tensor * down = ggml_mul_mat(ctx0, layer.ff_down_w, gu);
+    if (layer.ff_down_w->type == GGML_TYPE_F32) {
+        // ffn_down is kept in F32 because its input can exceed the F16 range
+        ggml_prec_set_src(down, GGML_PREC_F32, 1);
+    }
 
     return ggml_add(ctx0, cur, down);
 }
